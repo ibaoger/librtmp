@@ -79,6 +79,7 @@ HTTP_get(struct HTTP_ctx *http, const char *url, HTTP_read_callback *cb)
   char *p1, *p2;
   char hbuf[256];
   int port = 80;
+  char sport[6];
 #ifdef CRYPTO
   int ssl = 0;
 #endif
@@ -86,13 +87,18 @@ HTTP_get(struct HTTP_ctx *http, const char *url, HTTP_read_callback *cb)
   int rc, i;
   int len_known;
   HTTPResult ret = HTTPRES_OK;
-  struct sockaddr_in sa;
+  //struct sockaddr_in sa;
+  struct addrinfo hints = {0}, *ai;
   RTMPSockBuf sb = {0};
 
   http->status = -1;
 
-  memset(&sa, 0, sizeof(struct sockaddr_in));
-  sa.sin_family = AF_INET;
+  //memset(&sa, 0, sizeof(struct sockaddr_in));
+  //sa.sin_family = AF_INET;
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  snprintf(sport, sizeof(sport), "%d", port);
+  sport[5] = 0;
 
   /* we only handle http here */
   if (strncasecmp(url, "http", 4))
@@ -127,18 +133,27 @@ HTTP_get(struct HTTP_ctx *http, const char *url, HTTP_read_callback *cb)
       port = atoi(p1);
     }
 
-  sa.sin_addr.s_addr = inet_addr(host);
-  if (sa.sin_addr.s_addr == INADDR_NONE)
-    {
-      struct hostent *hp = gethostbyname(host);
-      if (!hp || !hp->h_addr)
-	return HTTPRES_LOST_CONNECTION;
-      sa.sin_addr = *(struct in_addr *)hp->h_addr;
-    }
-  sa.sin_port = htons(port);
-  sb.sb_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (sb.sb_socket == -1)
+  //sa.sin_addr.s_addr = inet_addr(host);
+  //if (sa.sin_addr.s_addr == INADDR_NONE)
+  //  {
+  //    struct hostent *hp = gethostbyname(host);
+  //    if (!hp || !hp->h_addr)
+  //    return HTTPRES_LOST_CONNECTION;
+  //    sa.sin_addr = *(struct in_addr *)hp->h_addr;
+  //  }
+  //sa.sin_port = htons(port);
+  //sb.sb_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  //if (sb.sb_socket == -1)
+  //  return HTTPRES_LOST_CONNECTION;
+  ret = getaddrinfo(host, sport, &hints, &ai);
+  if (ret != 0) {
     return HTTPRES_LOST_CONNECTION;
+  }
+  sb.sb_socket = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+  if (sb.sb_socket == -1) {
+    freeaddrinfo(ai);
+    return HTTPRES_LOST_CONNECTION;
+  }
   i =
     sprintf(sb.sb_buf,
 	    "GET %s HTTP/1.0\r\nUser-Agent: %s\r\nHost: %s\r\nReferer: %.*s\r\n",
@@ -147,8 +162,9 @@ HTTP_get(struct HTTP_ctx *http, const char *url, HTTP_read_callback *cb)
     i += sprintf(sb.sb_buf + i, "If-Modified-Since: %s\r\n", http->date);
   i += sprintf(sb.sb_buf + i, "\r\n");
 
-  if (connect
-      (sb.sb_socket, (struct sockaddr *)&sa, sizeof(struct sockaddr)) < 0)
+  //if (connect
+  //    (sb.sb_socket, (struct sockaddr *)&sa, sizeof(struct sockaddr)) < 0)
+  if (connect(sb.sb_socket, ai->ai_addr, ai->ai_addrlen) < 0)
     {
       ret = HTTPRES_LOST_CONNECTION;
       goto leave;
@@ -279,6 +295,7 @@ HTTP_get(struct HTTP_ctx *http, const char *url, HTTP_read_callback *cb)
 
 leave:
   RTMPSockBuf_Close(&sb);
+    freeaddrinfo(ai);
   return ret;
 }
 
