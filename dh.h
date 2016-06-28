@@ -164,8 +164,8 @@ static int MDH_compute_key(uint8_t *secret, size_t len, MP_t pub, MDH *dh)
 }
 
 #else /* USE_OPENSSL */
-#include <openssl/bn.h>
-#include <openssl/dh.h>
+#include "../../include/openssl/bn.h"
+#include "../../include/openssl/dh.h"
 
 typedef BIGNUM * MP_t;
 #define MP_new(m)	m = BN_new()

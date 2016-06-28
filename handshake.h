@@ -63,9 +63,9 @@ typedef struct arcfour_ctx*	RC4_handle;
 #define RC4_free(h)	free(h)
 
 #else	/* USE_OPENSSL */
-#include <openssl/sha.h>
-#include <openssl/hmac.h>
-#include <openssl/rc4.h>
+#include "../../include/openssl/sha.h"
+#include "../../include/openssl/hmac.h"
+#include "../../include/openssl/rc4.h"
 #if OPENSSL_VERSION_NUMBER < 0x0090800 || !defined(SHA256_DIGEST_LENGTH)
 #error Your OpenSSL is too old, need 0.9.8 or newer with SHA256
 #endif

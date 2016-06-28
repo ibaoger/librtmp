@@ -66,6 +66,9 @@
 extern void RTMP_TLS_Init();
 extern TLS_CTX RTMP_TLS_ctx;
 
+#ifdef _WIN32
+#define ZLIB_WINAPI
+#endif
 #include <zlib.h>
 
 #endif /* CRYPTO */

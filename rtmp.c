@@ -32,6 +32,11 @@
 #include "rtmp_sys.h"
 #include "log.h"
 
+#ifdef _WIN32
+#include "pipe.h"
+#endif // _WIN32
+
+
 #ifdef CRYPTO
 #ifdef USE_POLARSSL
 #include <polarssl/havege.h>
@@ -143,10 +148,15 @@ static int HTTP_Post(RTMP *r, RTMPTCmd cmd, const char *buf, int len);
 static int HTTP_read(RTMP *r, int fill);
 
 static void CloseInternal(RTMP *r, int reconnect);
+static int waiting_for_ready(RTMP *r, int fd, fd_set *rd, fd_set *wr, fd_set *ex, int extend);
+
+#ifndef SOCK_NONBLOCK
+#define SOCK_NONBLOCK 0
+#endif
 
 #ifndef _WIN32
 static int clk_tck;
-#endif
+#endif //!_WIN32
 
 #ifdef CRYPTO
 #include "handshake.h"
@@ -345,6 +355,9 @@ RTMP_Init(RTMP *r)
   r->m_fVideoCodecs = 252.0;
   r->Link.timeout = 30;
   r->Link.swfAge = 30;
+  r->m_interruptSign[0] = 0;
+  r->m_interruptSign[1] = 0;
+  pipe(r->m_interruptSign);
 }
 
 void
@@ -924,16 +937,65 @@ RTMP_Connect0(RTMP *r, struct addrinfo *ai)
   //r->m_sb.sb_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   r->m_sb.sb_socket = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
   if (r->m_sb.sb_socket != -1)
-    {
+  {
+      /* set socket non-block */
+#ifdef _WIN32
+      u_long iMode = 1;
+      if (ioctlsocket(r->m_sb.sb_socket, FIONBIO, &iMode) != NO_ERROR)
+      {
+          int err = GetSockError();
+          RTMP_Log(RTMP_LOGERROR, "%s, failed to set socket non-block. %d (%s)",
+                   __FUNCTION__, err, strerror(err));
+          RTMP_Close(r);
+          return FALSE;
+      }
+#else
+      int flags = fcntl(r->m_sb.sb_socket, F_GETFL, 0);
+      if (flags >= 0)
+          if (fcntl(r->m_sb.sb_socket, F_SETFL, flags | O_NONBLOCK) < 0) {
+              int err = GetSockError();
+              RTMP_Log(RTMP_LOGERROR, "%s, failed to set socket non-block. %d (%s)",
+                       __FUNCTION__, err, strerror(err));
+              RTMP_Close(r);
+              return FALSE;
+          }
+#endif
       //if (connect(r->m_sb.sb_socket, service, sizeof(struct sockaddr)) < 0)
-      if (connect(r->m_sb.sb_socket, ai->ai_addr, ai->ai_addrlen) < 0)
-	{
-	  int err = GetSockError();
-	  RTMP_Log(RTMP_LOGERROR, "%s, failed to connect socket. %d (%s)",
-	      __FUNCTION__, err, strerror(err));
-	  RTMP_Close(r);
-	  return FALSE;
-	}
+      int ret = connect(r->m_sb.sb_socket, ai->ai_addr, ai->ai_addrlen);
+      if (ret < 0) {
+          RTMP_Log(RTMP_LOGDEBUG, "%s ... SOCKS negotiation", __FUNCTION__);
+          int err = GetSockError();
+          //The socket is nonblocking and the connection cannot be completed immediately.
+#ifdef _WIN32
+          if (err == WSAEWOULDBLOCK) {
+#else
+          if (err == EINPROGRESS) {
+#endif // _WIN32
+              fd_set rdset, wrset, exset;
+              int ready = 0;
+              FD_ZERO(&rdset);
+              FD_ZERO(&wrset);
+              FD_ZERO(&exset);
+              FD_SET(r->m_sb.sb_socket, &rdset);
+              FD_SET(r->m_sb.sb_socket, &wrset);
+              FD_SET(r->m_sb.sb_socket, &exset);
+              ready = waiting_for_ready(r, r->m_sb.sb_socket, &rdset, &wrset, &exset, 1);
+              if (ready < 0) {
+                  RTMP_Log(RTMP_LOGERROR, "%s, failed to connect socket. %d (%s)",
+                           __FUNCTION__, err, strerror(err));
+                  RTMP_Close(r);
+                  return FALSE;
+              }
+          } else {
+              RTMP_Log(RTMP_LOGERROR, "%s, failed to connect socket. %d (%s)",
+                       __FUNCTION__, err, strerror(err));
+              RTMP_Close(r);
+              return FALSE;
+          }
+      } else {
+          RTMP_Log(RTMP_LOGDEBUG, "connect success immediatly ......");
+          //connect success immediatly, select is needless.
+      }
 
       if (r->Link.socksport)
 	{
@@ -1051,7 +1113,8 @@ RTMP_Connect(RTMP *r, RTMPPacket *cp)
   //memset(&service, 0, sizeof(struct sockaddr_in));
   //service.sin_family = AF_INET;
   hints.ai_family = PF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
+  /* SOCK_NONBLOCK: linux kernel >= 2.6.27 */
+  hints.ai_socktype = SOCK_STREAM | SOCK_NONBLOCK;
 
   if (r->Link.socksport)
     {
@@ -1413,6 +1476,132 @@ extern FILE *netstackdump;
 extern FILE *netstackdump_read;
 #endif
 
+#define SSH_SELECT_E_READY 0
+#define SSH_SELECT_E_ERROR -1
+#define SSH_SELECT_E_TIMEOUT -2
+
+/* default timeout is rtmp connect timeout 
+ * Note:
+ *     useless fd_set should be 0.
+ *
+ * @extend 1:connect method 0:other method
+ * @return 0:ready -1:error -2:time out
+ *
+ * BUG:
+ * search BUGS tags in the following page
+ * http://man7.org/linux/man-pages/man2/select.2.html
+ */
+static int waiting_for_ready(RTMP *r, int fd, fd_set *rd, fd_set *wr, fd_set *ex, int extend)
+{
+    int ret, err, len;
+    struct timeval tv = {r->Link.timeout, 0};
+    // rdExt for win32 m_interruptSign[0] readable
+    // exExt for unix m_interruptSign[1] error
+    fd_set rdExt, exExt;
+    fd_set *prdExt, *pexExt, *pwrExt = wr;
+    FD_ZERO(&rdExt);
+    FD_ZERO(&exExt);
+
+#ifdef _WIN32
+    if (rd == 0) {
+        FD_SET(r->m_interruptSign[0], &rdExt);
+        prdExt = &rdExt;
+    } else {
+        FD_SET(r->m_interruptSign[0], rd);
+        prdExt = rd;
+    }
+#else
+    prdExt = rd;
+#endif // _WIN32
+
+#ifdef _WIN32
+    pexExt = ex;
+#else
+    //in POSIX system, when connect, fd_set ex should be NULL, or select will error.
+    if (extend == 1)
+        ex = 0;
+
+    if (ex == 0) {
+        FD_SET(r->m_interruptSign[1], &exExt);
+        pexExt = &exExt;
+    }
+    else {
+        FD_SET(r->m_interruptSign[1], ex);
+        pexExt = ex;
+    }
+#endif // _WIN32
+
+#ifdef _WIN32
+    int nfds = fd;
+#else
+    int nfds = (r->m_interruptSign[1] > fd) ? r->m_interruptSign[1] : fd;
+#endif // _WIN32
+
+    ret = select(nfds + 1, prdExt, pwrExt, pexExt, &tv);
+    if (ret == 0) {
+        RTMP_Log(RTMP_LOGDEBUG, "waiting socket time out");
+        return SSH_SELECT_E_TIMEOUT;
+    } else if (ret < 0) {
+
+#ifdef _WIN32
+        RTMP_Log(RTMP_LOGDEBUG, "waiting socket error");
+#else
+        if (FD_ISSET(r->m_interruptSign[1], pexExt))
+            RTMP_Log(RTMP_LOGDEBUG, "waiting socket was interrupt");
+        else
+            RTMP_Log(RTMP_LOGDEBUG, "waiting socket error");
+#endif // _WIN32
+
+        return SSH_SELECT_E_ERROR;
+    } else {
+
+#ifdef _WIN32
+        if (FD_ISSET(r->m_interruptSign[0], prdExt)) {
+            RTMP_Log(RTMP_LOGDEBUG, "waiting socket was interrupt");
+            return SSH_SELECT_E_ERROR;
+        }
+#endif // _WIN32
+
+        int ready = 1;
+        if (rd != 0 && wr == 0) {
+            ready = ready && FD_ISSET(fd, rd);
+        } else if (rd == 0 && wr != 0) {
+            ready = ready && FD_ISSET(fd, wr);
+        } else if (rd != 0 && wr != 0) {
+            ready = ready && (FD_ISSET(fd, rd) || FD_ISSET(fd, wr));
+        }
+
+        if (ex != 0) {
+            ready = ready && !FD_ISSET(fd, ex);
+        }
+
+#ifndef _WIN32
+        // POSIX system, use getsockopt check connect error.
+        if (extend == 1) {
+            //posix 定义了两条与 select 和 非阻塞 connect 相关的规定：
+            //1.连接成功建立时，socket 描述字变为可写（连接建立时，写缓冲区空闲，所以可写）
+            //2.连接建立失败时，socket 描述字既可读又可写（由于有未决的错误，从而可读又可写）
+            len = sizeof(err);
+            ret = getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+            if (ret < 0) {
+                ready = ready && 0;
+            }
+            else {
+                ready = ready && 1;
+            }
+        }
+#endif // !_WIN32
+
+        if (ready > 0) {
+            return SSH_SELECT_E_READY;
+        }
+        else {
+            RTMP_Log(RTMP_LOGDEBUG, "waiting_for_ready error");
+            return SSH_SELECT_E_ERROR;
+        }
+    }
+}
+
 static int
 ReadN(RTMP *r, char *buffer, int n)
 {
@@ -1440,7 +1629,7 @@ ReadN(RTMP *r, char *buffer, int n)
 	        {
 		  if (!r->m_unackd)
 		    HTTP_Post(r, RTMPT_IDLE, "", 1);
-		  if (RTMPSockBuf_Fill(&r->m_sb) < 1)
+		  if (RTMPSockBuf_Fill(r) < 1)
 		    {
 		      if (!r->m_sb.sb_timedout)
 		        RTMP_Close(r);
@@ -1463,7 +1652,7 @@ ReadN(RTMP *r, char *buffer, int n)
                 }
 	    }
 	  if (r->m_resplen && !r->m_sb.sb_size)
-	    RTMPSockBuf_Fill(&r->m_sb);
+	    RTMPSockBuf_Fill(r);
           avail = r->m_sb.sb_size;
 	  if (avail > r->m_resplen)
 	    avail = r->m_resplen;
@@ -1473,7 +1662,7 @@ ReadN(RTMP *r, char *buffer, int n)
           avail = r->m_sb.sb_size;
 	  if (avail == 0)
 	    {
-	      if (RTMPSockBuf_Fill(&r->m_sb) < 1)
+	      if (RTMPSockBuf_Fill(r) < 1)
 	        {
 	          if (!r->m_sb.sb_timedout)
 	            RTMP_Close(r);
@@ -1551,7 +1740,7 @@ WriteN(RTMP *r, const char *buffer, int n)
       if (r->Link.protocol & RTMP_FEATURE_HTTP)
         nBytes = HTTP_Post(r, RTMPT_SEND, ptr, n);
       else
-        nBytes = RTMPSockBuf_Send(&r->m_sb, ptr, n);
+        nBytes = RTMPSockBuf_Send(r, ptr, n);
       /*RTMP_Log(RTMP_LOGDEBUG, "%s: %d\n", __FUNCTION__, nBytes); */
 
       if (nBytes < 0)
@@ -4153,7 +4342,23 @@ RTMP_Serve(RTMP *r)
 void
 RTMP_Close(RTMP *r)
 {
+#ifdef _WIN32
+    char buf[1];
+    pipewrite(r->m_interruptSign[1], buf, 1);
+#else
+    close(r->m_interruptSign[0]);
+#endif // _WIN32
+
   CloseInternal(r, 0);
+
+#ifdef _WIN32
+  closesocket(r->m_interruptSign[0]);
+  closesocket(r->m_interruptSign[1]);
+#else
+  close(r->m_interruptSign[0]);
+  close(r->m_interruptSign[1]);
+#endif // _WIN32
+
 }
 
 static void
@@ -4178,7 +4383,7 @@ CloseInternal(RTMP *r, int reconnect)
 	  r->m_clientID.av_val = NULL;
 	  r->m_clientID.av_len = 0;
 	}
-      RTMPSockBuf_Close(&r->m_sb);
+      RTMPSockBuf_Close(r);
     }
 
   r->m_stream_id = -1;
@@ -4276,9 +4481,11 @@ CloseInternal(RTMP *r, int reconnect)
 }
 
 int
-RTMPSockBuf_Fill(RTMPSockBuf *sb)
+//RTMPSockBuf_Fill(RTMPSockBuf *sb)
+RTMPSockBuf_Fill(RTMP *r)
 {
   int nBytes;
+  RTMPSockBuf *sb = &r->m_sb;
 
   if (!sb->sb_size)
     sb->sb_start = sb->sb_buf;
@@ -4293,8 +4500,19 @@ RTMPSockBuf_Fill(RTMPSockBuf *sb)
 	}
       else
 #endif
-	{
-	  nBytes = recv(sb->sb_socket, sb->sb_start + sb->sb_size, nBytes, 0);
+    {
+        int ready;
+        fd_set rdset, exset;
+        FD_ZERO(&rdset);
+        FD_ZERO(&exset);
+        FD_SET(sb->sb_socket, &rdset);
+        FD_SET(sb->sb_socket, &exset);
+        ready = waiting_for_ready(r, sb->sb_socket, &rdset, 0, &exset, 0);
+        if (ready < 0) {
+            nBytes = -1;
+        } else {
+            nBytes = recv(sb->sb_socket, sb->sb_start + sb->sb_size, nBytes, 0);
+        }
 	}
       if (nBytes != -1)
 	{
@@ -4321,9 +4539,11 @@ RTMPSockBuf_Fill(RTMPSockBuf *sb)
 }
 
 int
-RTMPSockBuf_Send(RTMPSockBuf *sb, const char *buf, int len)
+//RTMPSockBuf_Send(RTMPSockBuf *sb, const char *buf, int len)
+RTMPSockBuf_Send(RTMP *r, const char *buf, int len)
 {
   int rc;
+  RTMPSockBuf *sb = &r->m_sb;
 
 #ifdef _DEBUG
   fwrite(buf, 1, len, netstackdump);
@@ -4337,14 +4557,27 @@ RTMPSockBuf_Send(RTMPSockBuf *sb, const char *buf, int len)
   else
 #endif
     {
-      rc = send(sb->sb_socket, buf, len, 0);
+        int ready;
+        fd_set wrset, exset;
+        FD_ZERO(&wrset);
+        FD_ZERO(&exset);
+        FD_SET(sb->sb_socket, &wrset);
+        FD_SET(sb->sb_socket, &exset);
+        ready = waiting_for_ready(r, sb->sb_socket, 0, &wrset, &exset, 0);
+        if (ready < 0) {
+            rc = -1;
+        } else {
+            rc = send(sb->sb_socket, buf, len, 0);
+        }
     }
   return rc;
 }
 
 int
-RTMPSockBuf_Close(RTMPSockBuf *sb)
+//RTMPSockBuf_Close(RTMPSockBuf *sb)
+RTMPSockBuf_Close(RTMP *r)
 {
+  RTMPSockBuf *sb = &r->m_sb;
 #if defined(CRYPTO) && !defined(NO_SSL)
   if (sb->sb_ssl)
     {
@@ -4445,8 +4678,8 @@ HTTP_Post(RTMP *r, RTMPTCmd cmd, const char *buf, int len)
     r->m_clientID.av_val ? r->m_clientID.av_val : "",
     r->m_msgCounter, r->Link.hostname.av_len, r->Link.hostname.av_val,
     r->Link.port, len);
-  RTMPSockBuf_Send(&r->m_sb, hbuf, hlen);
-  hlen = RTMPSockBuf_Send(&r->m_sb, buf, len);
+  RTMPSockBuf_Send(r, hbuf, hlen);
+  hlen = RTMPSockBuf_Send(r, buf, len);
   r->m_msgCounter++;
   r->m_unackd++;
   return hlen;
@@ -4460,7 +4693,7 @@ HTTP_read(RTMP *r, int fill)
 
 restart:
   if (fill)
-    RTMPSockBuf_Fill(&r->m_sb);
+    RTMPSockBuf_Fill(r);
   if (r->m_sb.sb_size < 13) {
     if (fill)
       goto restart;
