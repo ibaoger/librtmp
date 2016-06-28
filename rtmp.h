@@ -274,6 +274,11 @@ extern "C"
     int m_polling;
     int m_resplen;
     int m_unackd;
+#ifdef _WIN32
+    SOCKET m_interruptSign[2];
+#else
+    int m_interruptSign[2];
+#endif // _WIN32
     AVal m_clientID;
 
     RTMP_READ m_read;
@@ -356,9 +361,12 @@ extern "C"
   int RTMP_FindFirstMatchingProperty(AMFObject *obj, const AVal *name,
 				      AMFObjectProperty * p);
 
-  int RTMPSockBuf_Fill(RTMPSockBuf *sb);
-  int RTMPSockBuf_Send(RTMPSockBuf *sb, const char *buf, int len);
-  int RTMPSockBuf_Close(RTMPSockBuf *sb);
+  //int RTMPSockBuf_Fill(RTMPSockBuf *sb);
+  //int RTMPSockBuf_Send(RTMPSockBuf *sb, const char *buf, int len);
+  //int RTMPSockBuf_Close(RTMPSockBuf *sb);
+  int RTMPSockBuf_Fill(RTMP *r);
+  int RTMPSockBuf_Send(RTMP *r, const char *buf, int len);
+  int RTMPSockBuf_Close(RTMP *r);
 
   int RTMP_SendCreateStream(RTMP *r);
   int RTMP_SendSeek(RTMP *r, int dTime);

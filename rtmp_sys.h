@@ -45,11 +45,13 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/times.h>
+#include <sys/select.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 #define GetSockError()	errno
 #define SetSockError(e)	errno = e
 #undef closesocket
