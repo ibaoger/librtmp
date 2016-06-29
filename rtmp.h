@@ -26,7 +26,7 @@
  */
 
 #if !defined(NO_CRYPTO) && !defined(CRYPTO)
-#define CRYPTO
+//#define CRYPTO
 #endif
 
 #include <errno.h>
