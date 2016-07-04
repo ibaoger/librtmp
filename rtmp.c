@@ -36,6 +36,11 @@
 #include "pipe.h"
 #endif // _WIN32
 
+#if defined(_WIN32)
+#elif defined(__APPLE__) && defined(__MACH__)
+#else
+#define SO_NOSIGPIPE MSG_NOSIGNAL
+#endif
 
 #ifdef CRYPTO
 #ifdef USE_POLARSSL
