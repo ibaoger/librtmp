@@ -27,10 +27,24 @@
 #include <assert.h>
 #include <ctype.h>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif //__ANDROID__
+
 #include "rtmp_sys.h"
 #include "log.h"
 
 #define MAX_PRINT_LEN	2048
+
+#ifdef __ANDROID__
+#define LOG_TAG "LibRTMP.NDK"
+#define LOGV(...) ((void)__android_log_print(ANDROID_LOG_VERBOSE, LOG_TAG, __VA_ARGS__))
+#define LOGD(...) ((void)__android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__))
+#define LOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__))
+#define LOGW(...) ((void)__android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__))
+#define LOGE(...) ((void)__android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__))
+#define LOGA(...) ((void)__android_log_print(ANDROID_LOG_ASSERT, LOG_TAG, __VA_ARGS__))
+#endif //__ANDROID__
 
 RTMP_LogLevel RTMP_debuglevel = RTMP_LOGERROR;
 
@@ -51,6 +65,24 @@ static void rtmp_log_default(int level, const char *format, va_list vl)
 
 	vsnprintf(str, MAX_PRINT_LEN-1, format, vl);
 
+#ifdef __ANDROID__
+    if (level == RTMP_LOGALL) {
+        LOGV("%s\n", str);
+    } else if (level == RTMP_LOGDEBUG) {
+        LOGD("%s\n", str);
+    } else if (level == RTMP_LOGDEBUG2) {
+        LOGD("%s\n", str);
+    } else if (level == RTMP_LOGINFO) {
+        LOGI("%s\n", str);
+    } else if (level == RTMP_LOGWARNING) {
+        LOGW("%s\n", str);
+    } else if (level == RTMP_LOGERROR) {
+        LOGE("%s\n", str);
+    } else {
+        LOGI("%s\n", str);
+    }
+
+#else //!__ANDROID__
 	/* Filter out 'no-name' */
 	if ( RTMP_debuglevel<RTMP_LOGALL && strstr(str, "no-name" ) != NULL )
 		return;
@@ -66,7 +98,9 @@ static void rtmp_log_default(int level, const char *format, va_list vl)
 #ifdef _DEBUG
 		fflush(fmsg);
 #endif
-	}
+    }
+
+#endif //__ANDROID__
 }
 
 void RTMP_LogSetOutput(FILE *file)
@@ -93,8 +127,10 @@ void RTMP_Log(int level, const char *format, ...)
 {
 	va_list args;
 
+#ifndef __ANDROID__
 	if ( level > RTMP_debuglevel )
 		return;
+#endif //!__ANDROID__
 
 	va_start(args, format);
 	cb(level, format, args);
