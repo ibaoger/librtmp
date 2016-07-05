@@ -122,6 +122,7 @@ parsehost:
 		} else {
 			*port = p2;
 		}
+        RTMP_Log(RTMP_LOGDEBUG, "Parsed port    : %u", p2);
 	}
 
 	if(!slash) {

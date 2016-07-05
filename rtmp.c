@@ -155,10 +155,6 @@ static int HTTP_read(RTMP *r, int fill);
 static void CloseInternal(RTMP *r, int reconnect);
 static int waiting_for_ready(RTMP *r, int fd, fd_set *rd, fd_set *wr, fd_set *ex, int extend);
 
-#ifndef SOCK_NONBLOCK
-#define SOCK_NONBLOCK 0
-#endif
-
 #ifndef _WIN32
 static int clk_tck;
 #endif //!_WIN32
@@ -919,7 +915,7 @@ add_addr_info(struct addrinfo *hints, struct addrinfo **ai, AVal *host, int port
   sport[5] = 0;
   int addrret = getaddrinfo(hostname, sport, hints, ai);
   if (addrret != 0) {
-    RTMP_Log(RTMP_LOGERROR, "Problem accessing the DNS. (addr: %s)", hostname);
+    RTMP_Log(RTMP_LOGERROR, "Problem accessing the DNS. %d (%s) (addr: %s)", addrret, gai_strerror(addrret), hostname);
     ret = FALSE;
   }
 
@@ -1121,8 +1117,7 @@ RTMP_Connect(RTMP *r, RTMPPacket *cp)
   //memset(&service, 0, sizeof(struct sockaddr_in));
   //service.sin_family = AF_INET;
   hints.ai_family = PF_UNSPEC;
-  /* SOCK_NONBLOCK: linux kernel >= 2.6.27 */
-  hints.ai_socktype = SOCK_STREAM | SOCK_NONBLOCK;
+  hints.ai_socktype = SOCK_STREAM;
 
   if (r->Link.socksport)
     {
